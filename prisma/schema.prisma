@@ -1,0 +1,544 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String   // "admin", "reseller", "vendor"
+  resellerId   String?  @unique
+  vendorId     String?  @unique
+  cnic         String?  @unique
+  createdAt    DateTime @default(now())
+
+  reseller     Reseller? @relation(fields: [resellerId], references: [id])
+  vendor       Vendor?   @relation(fields: [vendorId], references: [id])
+
+  @@index([role])
+}
+
+model KycRequest {
+  id            String   @id @default(cuid())
+  email         String
+  passwordHash  String
+  name          String
+  phone         String
+  cnic          String
+  idFront       String?
+  idBack        String?
+  bankName      String
+  accountName   String
+  accountNumber String
+  iban          String?
+  accountType   String   // "reseller" or "vendor"
+  status        String   @default("Pending") // "Pending", "Approved", "Rejected"
+  adminNote     String?
+  reviewedBy    String?
+  // Vendor-specific KYC fields
+  businessAddress    String?
+  pickupAddress      String?
+  pickupCity         String?
+  pickupPhone        String?
+  returnAddress      String?
+  returnCity         String?
+  createdAt     DateTime @default(now())
+
+  @@index([status])
+  @@index([accountType])
+}
+
+// ─────────────────────────────────────────────
+// PLATFORM CONFIGURATION (configurable fees)
+// ─────────────────────────────────────────────
+
+model PlatformConfig {
+  id                  String   @id @default(cuid())
+  deliveryFee         Float    @default(250)    // PKR per order
+  platformFeePerOrder Float    @default(100)    // Total platform fee per settled order
+  vendorFeePercent    Float    @default(60)     // % of platformFeePerOrder → vendor
+  resellerFeePercent  Float    @default(40)     // % of platformFeePerOrder → reseller
+  minWithdrawal       Float    @default(1500)   // Minimum withdrawal amount
+  codReserveAmount    Float    @default(500)    // COD security deposit
+  firstOrdersMonitor  Int      @default(2)      // How many initial orders are monitored
+  rtoCharge           Float    @default(250)    // RTO penalty charge
+  updatedAt           DateTime @updatedAt
+  updatedBy           String?
+}
+
+// ─────────────────────────────────────────────
+// RESELLER
+// ─────────────────────────────────────────────
+
+model Reseller {
+  id                 String   @id @default(cuid())
+  name               String
+  brandName          String
+  brandLogo          String?
+  phone              String
+  email              String?
+  storeAddress       String?
+  supportEmail       String?
+  balance            Float    @default(0)       // Available balance (withdrawable)
+  pendingBalance     Float    @default(0)       // In-flight settlement (not yet settled)
+  codReserve         Float    @default(0)       // Locked COD security deposit
+  totalWithdrawn     Float    @default(0)       // Lifetime withdrawn
+  isLocked           Boolean  @default(false)
+  totalOrdersPlaced  Int      @default(0)
+  totalOrdersFailed  Int      @default(0)
+  shopifyDomain      String?
+  shopifyToken       String?                    // NEVER expose to client
+  shopifyConnected   Boolean  @default(false)
+  createdAt          DateTime @default(now())
+
+  user               User?
+  orders             Order[]
+  ledgers            Ledger[]
+  payouts            Payout[]
+  unlocks            Unlock[]
+  messages           Message[]
+  shopifyMappings    ShopifyMapping[]
+}
+
+// ─────────────────────────────────────────────
+// VENDOR
+// ─────────────────────────────────────────────
+
+model Vendor {
+  id              String   @id @default(cuid())
+  name            String
+  brandName       String
+  brandLogo       String?
+  phone           String
+  email           String?
+  // Business Info
+  ownerName       String?
+  cnicNumber      String?
+  businessAddress String?
+  // Pickup details
+  pickupPersonName String?
+  pickupPhone     String?
+  pickupAddress   String?
+  pickupCity      String?
+  pickupArea      String?
+  postalCode      String?
+  // Return / RTO address
+  returnAddress   String?
+  returnCity      String?
+  returnContact   String?
+  returnPhone     String?
+  // Bank/payment
+  bankName        String
+  accountName     String
+  accountNumber   String
+  iban            String?
+  // Financial
+  balance         Float    @default(0)
+  pendingBalance  Float    @default(0)
+  totalWithdrawn  Float    @default(0)
+  // Status
+  approvalStatus  String   @default("Pending")  // "Pending"|"UnderReview"|"Approved"|"Rejected"|"Suspended"
+  kycStatus       String   @default("Pending")  // "Pending"|"UnderReview"|"Approved"|"Rejected"|"Suspended"
+  createdAt       DateTime @default(now())
+
+  user            User?
+  products        Product[]
+  ledgers         Ledger[]
+  payouts         Payout[]
+  stockMovements  StockMovement[]
+
+  @@index([approvalStatus])
+}
+
+// ─────────────────────────────────────────────
+// CATEGORY
+// ─────────────────────────────────────────────
+
+model Category {
+  id        String    @id @default(cuid())
+  title     String
+  image     String
+  products  Product[]
+}
+
+// ─────────────────────────────────────────────
+// PRODUCT
+// ─────────────────────────────────────────────
+
+model Product {
+  id                 String   @id @default(cuid())
+  sku                String?  @unique             // Stock Keeping Unit — auto-generated
+  vendorId           String?
+  categoryId         String
+  title              String
+  hook               String?
+  description        String?
+  brand              String?                      // Brand name
+  images             String                       // JSON array of URLs
+  videoUrl           String?                      // Optional product video
+  colors             String                       // JSON array
+  sizes              String                       // JSON array
+  colorPricing       String?                      // JSON map
+  sizePricing        String?                      // JSON map
+  colorImages        String?                      // JSON map
+  weight             Float    @default(500)       // grams (default 500g)
+  dimensions         String?                      // JSON: { l, w, h } in cm
+  wholesale          Float                        // Vendor cost / base price
+  suggested          Float                        // Suggested selling price
+  minSellingPrice    Float?                       // Minimum allowed selling price
+  stock              Int      @default(0)         // Physical warehouse stock
+  reservedStock      Int      @default(0)         // Reserved by open orders
+  soldQty            Int      @default(0)         // Lifetime sold count
+  lowStockThreshold  Int      @default(5)
+  returnable         Boolean  @default(true)      // Is product returnable?
+  fragile            Boolean  @default(false)     // Is product fragile?
+  approvalStatus     String   @default("PENDING_ADMIN_APPROVAL")
+  // "PENDING_ADMIN_APPROVAL"|"APPROVED"|"REJECTED"|"CHANGES_REQUESTED"
+  rejectionReason    String?                      // Admin reason for rejection
+  isActive           Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  vendor             Vendor?        @relation(fields: [vendorId], references: [id])
+  category           Category       @relation(fields: [categoryId], references: [id])
+  orders             Order[]
+  stockMovements     StockMovement[]
+  shopifyMappings    ShopifyMapping[]
+
+  @@index([vendorId])
+  @@index([categoryId])
+  @@index([approvalStatus])
+  @@index([isActive])
+  @@index([title])
+}
+
+// ─────────────────────────────────────────────
+// STOCK MOVEMENT (inventory history)
+// ─────────────────────────────────────────────
+
+model StockMovement {
+  id          String   @id @default(cuid())
+  productId   String
+  vendorId    String?
+  type        String   // "received","reserved","released","sold","returned","damaged","adjusted"
+  qty         Int      // positive = in, negative = out
+  note        String?
+  orderId     String?
+  performedBy String   // userId or "system"
+  createdAt   DateTime @default(now())
+
+  product     Product  @relation(fields: [productId], references: [id])
+  vendor      Vendor?  @relation(fields: [vendorId], references: [id])
+
+  @@index([productId])
+  @@index([orderId])
+}
+
+// ─────────────────────────────────────────────
+// ORDER
+// ─────────────────────────────────────────────
+
+model Order {
+  id               String   @id
+  resellerId       String
+  vendorId         String?                        // Auto-filled from product.vendorId
+  productId        String
+  productTitle     String
+  image            String?
+  variant          String?
+  quantity         Int      @default(1)
+  customerName     String
+  phone1           String
+  phone2           String?
+  city             String
+  address          String
+  collect          Float                          // COD amount to collect
+  wholesale        Float                          // Vendor cost
+  delivery         Float                          // Delivery fee
+  shippingFee      Float    @default(0)           // Actual courier shipping fee
+  platformFee      Float    @default(0)           // Total platform fee (from PlatformConfig)
+  vendorFee        Float    @default(0)           // Platform deduction from vendor
+  resellerFee      Float    @default(0)           // Platform deduction from reseller
+  profit           Float                          // Reseller net profit after deductions
+  status           String   @default("Pending")
+  // Valid statuses: Pending | Confirmed | CourierBooked | AWBGenerated |
+  //                 ReadyForPickup | PickedUp | InTransit | OutForDelivery |
+  //                 Delivered | SettlementEligible | Settled |
+  //                 Cancelled | ReturnRequested | Returned | RTO | FailedDelivery
+  settlementStatus String   @default("Pending")   // "Pending" | "Eligible" | "Settled" | "Cancelled"
+  // Courier & tracking
+  trackingId       String?
+  courier          String?
+  courierShipmentId String?                       // FK to CourierShipment
+  awbNumber        String?                        // Air Waybill number
+  labelUrl         String?                        // Thermal label PDF/link
+  // Pickup info (auto-filled from vendor)
+  pickupCity       String?
+  pickupAddress    String?
+  pickupPhone      String?
+  // Weight from product
+  weight           Float?                         // grams
+  isPrinted        Boolean  @default(false)
+  // Edits
+  pendingEdits     String?                        // JSON
+  editStatus       String?
+  // Cancellation
+  cancelReason     String?
+  cancelledBy      String?                        // "customer"|"reseller"|"vendor"|"admin"|"courier"
+  // RTO
+  rtoReason        String?
+  rtoDate          DateTime?
+  rtoCharge        Float    @default(0)
+  vendorReturnStatus String?                      // "Pending"|"Returned"|"Lost"
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  reseller         Reseller  @relation(fields: [resellerId], references: [id])
+  product          Product   @relation(fields: [productId], references: [id])
+  timeline         OrderTimeline[]
+  courierShipment  CourierShipment?
+
+  @@index([resellerId])
+  @@index([vendorId])
+  @@index([status])
+  @@index([courier])
+  @@index([trackingId])
+  @@index([awbNumber])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────
+// ORDER TIMELINE (status history)
+// ─────────────────────────────────────────────
+
+model OrderTimeline {
+  id         String   @id @default(cuid())
+  orderId    String
+  prevStatus String?
+  newStatus  String
+  actor      String   // "admin" | resellerId | "system"
+  note       String?
+  createdAt  DateTime @default(now())
+
+  order      Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+// ─────────────────────────────────────────────
+// COURIER SHIPMENT (modular courier integration)
+// ─────────────────────────────────────────────
+
+model CourierShipment {
+  id              String   @id @default(cuid())
+  orderId         String   @unique
+  courierName     String   // "PostEx" | "Trax" | "Leopards" | "M&P" | "Mock"
+  shipmentId      String?
+  trackingId      String?
+  trackingUrl     String?
+  awbNumber       String?
+  labelUrl        String?                         // Thermal label PDF/URL
+  codAmount       Float
+  shippingRate    Float    @default(0)            // Rate charged by courier
+  weight          Float?                          // Weight in grams
+  pickupCity      String?
+  pickupAddress   String?
+  deliveryAddress String
+  deliveryCity    String?
+  status          String   @default("Pending")   // "Pending"|"Booked"|"PickedUp"|"InTransit"|"OutForDelivery"|"Delivered"|"Returned"|"RTO"
+  courierResponse String?                         // Raw JSON from courier API
+  trackingEvents  String?                         // JSON array of events
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  order           Order    @relation(fields: [orderId], references: [id])
+
+  @@index([trackingId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────
+// LEDGER (financial transaction log)
+// ─────────────────────────────────────────────
+
+model Ledger {
+  id         String   @id @default(cuid())
+  resellerId String?
+  vendorId   String?
+  orderId    String?
+  label      String
+  tag        String   // "Profit"|"Sale"|"Penalty"|"COD Reserve"|"Withdrawal"|"Refund"|"Fee"|"Adjustment"|"RTO Charge"|"Courier Fee"
+  amount     Float    // positive = credit, negative = debit
+  proof      String?
+  status     String   @default("Completed") // "Completed"|"Pending"|"Reversed"
+  date       DateTime @default(now())
+
+  reseller   Reseller? @relation(fields: [resellerId], references: [id])
+  vendor     Vendor?   @relation(fields: [vendorId], references: [id])
+
+  @@index([resellerId])
+  @@index([vendorId])
+  @@index([orderId])
+  @@index([tag])
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────
+// PAYOUT / WITHDRAWAL
+// ─────────────────────────────────────────────
+
+model Payout {
+  id            String   @id @default(cuid())
+  resellerId    String?
+  vendorId      String?
+  amount        Float
+  method        String   // "EasyPaisa"|"JazzCash"|"Bank Transfer"
+  accountName   String
+  accountNumber String
+  status        String   @default("Pending") // "Pending"|"Approved"|"Processing"|"Paid"|"Rejected"
+  proof         String?  // Payment proof from admin
+  adminNote     String?
+  paymentRef    String?  // Admin's transaction reference
+  processedBy   String?  // Admin ID
+  requestedAt   DateTime @default(now())
+  processedAt   DateTime?
+
+  reseller      Reseller? @relation(fields: [resellerId], references: [id])
+  vendor        Vendor?   @relation(fields: [vendorId], references: [id])
+
+  @@index([status])
+  @@index([resellerId])
+  @@index([vendorId])
+}
+
+// ─────────────────────────────────────────────
+// UNLOCK (COD security)
+// ─────────────────────────────────────────────
+
+model Unlock {
+  id            String   @id @default(cuid())
+  resellerId    String
+  trxId         String
+  receipt       String
+  amount        Float    @default(500)
+  method        String   @default("EasyPaisa")
+  status        String   @default("Pending") // "Pending"|"Approved"|"Rejected"
+  adminNote     String?
+  reviewedBy    String?
+  date          DateTime @default(now())
+  reviewedAt    DateTime?
+
+  reseller      Reseller @relation(fields: [resellerId], references: [id])
+
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────
+// SUPPORT CHAT
+// ─────────────────────────────────────────────
+
+model Conversation {
+  id          String    @id @default(cuid())
+  resellerId  String?
+  vendorId    String?
+  orderId     String?
+  subject     String?
+  status      String    @default("Open")  // "Open"|"Resolved"
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  messages    Message[]
+
+  @@index([resellerId])
+  @@index([vendorId])
+  @@index([orderId])
+}
+
+model Message {
+  id             String    @id @default(cuid())
+  // Legacy: direct reseller message (kept for backward compat)
+  resellerId     String?
+  // New: conversation-based
+  conversationId String?
+  from           String    // "reseller"|"vendor"|"admin"
+  text           String
+  attachmentUrl  String?
+  attachmentType String?   // "image"|"pdf"|"audio"
+  isRead         Boolean   @default(false)
+  at             DateTime  @default(now())
+
+  reseller       Reseller?     @relation(fields: [resellerId], references: [id])
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([resellerId])
+  @@index([conversationId])
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  target    String   // "admin" | resellerId | vendorId
+  title     String
+  message   String
+  type      String   @default("info") // "info"|"warning"|"success"|"error"
+  link      String?  // optional deeplink
+  read      Boolean  @default(false)
+  date      DateTime @default(now())
+
+  @@index([target])
+  @@index([read])
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────
+// SHOPIFY
+// ─────────────────────────────────────────────
+
+model ShopifyMapping {
+  id               String   @id @default(cuid())
+  resellerId       String
+  productId        String
+  shopifyProductId String
+  shopifyVariantId String?
+  syncedAt         DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  reseller         Reseller @relation(fields: [resellerId], references: [id])
+  product          Product  @relation(fields: [productId], references: [id])
+
+  @@index([resellerId])
+  @@index([productId])
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  adminId   String
+  action    String
+  entity    String
+  entityId  String
+  prevValue String?
+  newValue  String?
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([adminId])
+  @@index([createdAt])
+}
