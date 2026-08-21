@@ -15,117 +15,122 @@ const visionClient = new vision.ImageAnnotatorClient({
 });
 
 export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "date">) {
-  if (!data.cnic) {
-    return { error: "CNIC / ID Card Number is required." };
-  }
-
-  // --- 1. STRICT DUPLICATE CHECKS ---
-
-  // Check Users table for duplicates (CNIC, Email)
-  const existingUser = await db.user.findFirst({
-    where: { 
-      OR: [
-        { cnic: data.cnic },
-        { email: data.email }
-      ]
-    },
-  });
-
-  if (existingUser) {
-    if (existingUser.cnic === data.cnic) return { error: "An account with this CNIC already exists." };
-    if (existingUser.email === data.email) return { error: "This email is already registered." };
-  }
-
-  // Check KycRequests table for duplicates (CNIC, Email, Phone)
-  const existingKyc = await db.kycRequest.findFirst({
-    where: {
-      OR: [
-        { cnic: data.cnic },
-        { email: data.email },
-        { phone: data.phone }
-      ]
-    },
-  });
-
-  if (existingKyc) {
-    if (existingKyc.status === "Pending") {
-      return { error: "A KYC application with these details is already pending review." };
+  try {
+    if (!data.cnic) {
+      return { error: "CNIC / ID Card Number is required." };
     }
-    if (existingKyc.status === "Approved") {
-      return { error: "An account with these details is already approved." };
+
+    // --- 1. STRICT DUPLICATE CHECKS ---
+
+    // Check Users table for duplicates (CNIC, Email)
+    const existingUser = await db.user.findFirst({
+      where: { 
+        OR: [
+          { cnic: data.cnic },
+          { email: data.email }
+        ]
+      },
+    });
+
+    if (existingUser) {
+      if (existingUser.cnic === data.cnic) return { error: "An account with this CNIC already exists." };
+      if (existingUser.email === data.email) return { error: "This email is already registered." };
     }
-    // If Rejected, they can try again.
-  }
 
-  // Check Reseller/Vendor tables for duplicate phone
-  const existingResellerPhone = await db.reseller.findFirst({ where: { phone: data.phone } });
-  const existingVendorPhone = await db.vendor.findFirst({ where: { phone: data.phone } });
-  
-  if (existingResellerPhone || existingVendorPhone) {
-    return { error: "This phone number is already attached to an existing account." };
-  }
+    // Check KycRequests table for duplicates (CNIC, Email, Phone)
+    const existingKyc = await db.kycRequest.findFirst({
+      where: {
+        OR: [
+          { cnic: data.cnic },
+          { email: data.email },
+          { phone: data.phone }
+        ]
+      },
+    });
 
-  // --- 2. OCR VERIFICATION WITH GOOGLE VISION ---
-  if (data.idFront && process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
-    try {
-      // Strip base64 metadata (e.g. "data:image/jpeg;base64,")
-      const base64Data = data.idFront.replace(/^data:image\/\w+;base64,/, "");
-      
-      const [result] = await visionClient.textDetection({
-        image: { content: base64Data }
-      });
-      
-      const text = result.fullTextAnnotation?.text || "";
-      
-      // Clean up the text to make matching easier (remove spaces and dashes)
-      const cleanText = text.replace(/[\s-]/g, "");
-      const cleanInputCnic = data.cnic.replace(/[\s-]/g, "");
-      
-      if (!cleanText.includes(cleanInputCnic)) {
-        return { error: "OCR Verification Failed: The provided CNIC number was not found on the uploaded ID card." };
+    if (existingKyc) {
+      if (existingKyc.status === "Pending") {
+        return { error: "A KYC application with these details is already pending review." };
       }
-    } catch (error: any) {
-      console.error("Google Vision API Error:", error);
-      return { error: "Failed to verify ID card image. Please ensure the image is clear or try again later." };
+      if (existingKyc.status === "Approved") {
+        return { error: "An account with these details is already approved." };
+      }
+      // If Rejected, they can try again.
     }
+
+    // Check Reseller/Vendor tables for duplicate phone
+    const existingResellerPhone = await db.reseller.findFirst({ where: { phone: data.phone } });
+    const existingVendorPhone = await db.vendor.findFirst({ where: { phone: data.phone } });
+    
+    if (existingResellerPhone || existingVendorPhone) {
+      return { error: "This phone number is already attached to an existing account." };
+    }
+
+    // --- 2. OCR VERIFICATION WITH GOOGLE VISION ---
+    if (data.idFront && process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
+      try {
+        // Strip base64 metadata (e.g. "data:image/jpeg;base64,")
+        const base64Data = data.idFront.replace(/^data:image\/\w+;base64,/, "");
+        
+        const [result] = await visionClient.textDetection({
+          image: { content: base64Data }
+        });
+        
+        const text = result.fullTextAnnotation?.text || "";
+        
+        // Clean up the text to make matching easier (remove spaces and dashes)
+        const cleanText = text.replace(/[\s-]/g, "");
+        const cleanInputCnic = data.cnic.replace(/[\s-]/g, "");
+        
+        if (!cleanText.includes(cleanInputCnic)) {
+          return { error: "OCR Verification Failed: The provided CNIC number was not found on the uploaded ID card." };
+        }
+      } catch (error: any) {
+        console.error("Google Vision API Error:", error);
+        return { error: "Failed to verify ID card image. Please ensure the image is clear or try again later." };
+      }
+    }
+
+    // --- 3. UPLOAD IMAGES TO CLOUDINARY ---
+    let idFrontUrl = data.idFront;
+    let idBackUrl = data.idBack;
+
+    if (data.idFront && data.idFront.startsWith("data:image")) {
+      const { uploadToCloudinary } = await import("@/lib/cloudinary");
+      idFrontUrl = await uploadToCloudinary(data.idFront, "pakdropship/kyc");
+    }
+
+    if (data.idBack && data.idBack.startsWith("data:image")) {
+      const { uploadToCloudinary } = await import("@/lib/cloudinary");
+      idBackUrl = await uploadToCloudinary(data.idBack, "pakdropship/kyc");
+    }
+
+    // --- 4. CREATE KYC REQUEST ---
+    const hashedPassword = await bcrypt.hash(data.passwordHash, 10);
+
+    const newKyc = await db.kycRequest.create({
+      data: {
+        email: data.email,
+        passwordHash: hashedPassword,
+        name: data.name,
+        phone: data.phone,
+        cnic: data.cnic,
+        idFront: idFrontUrl,
+        idBack: idBackUrl,
+        bankName: data.bankName,
+        accountName: data.accountName,
+        accountNumber: data.accountNumber,
+        iban: data.iban,
+        accountType: data.accountType,
+        status: "Pending",
+      },
+    });
+
+    return { success: true, id: newKyc.id };
+  } catch (err: any) {
+    console.error("submitKycAction Error:", err);
+    return { error: err.message || "An unexpected error occurred. Please try again." };
   }
-
-  // --- 3. UPLOAD IMAGES TO CLOUDINARY ---
-  let idFrontUrl = data.idFront;
-  let idBackUrl = data.idBack;
-
-  if (data.idFront && data.idFront.startsWith("data:image")) {
-    const { uploadToCloudinary } = await import("@/lib/cloudinary");
-    idFrontUrl = await uploadToCloudinary(data.idFront, "pakdropship/kyc");
-  }
-
-  if (data.idBack && data.idBack.startsWith("data:image")) {
-    const { uploadToCloudinary } = await import("@/lib/cloudinary");
-    idBackUrl = await uploadToCloudinary(data.idBack, "pakdropship/kyc");
-  }
-
-  // --- 4. CREATE KYC REQUEST ---
-  const hashedPassword = await bcrypt.hash(data.passwordHash, 10);
-
-  const newKyc = await db.kycRequest.create({
-    data: {
-      email: data.email,
-      passwordHash: hashedPassword,
-      name: data.name,
-      phone: data.phone,
-      cnic: data.cnic,
-      idFront: idFrontUrl,
-      idBack: idBackUrl,
-      bankName: data.bankName,
-      accountName: data.accountName,
-      accountNumber: data.accountNumber,
-      iban: data.iban,
-      accountType: data.accountType,
-      status: "Pending",
-    },
-  });
-
-  return { success: true, id: newKyc.id };
 }
 
 export async function processKycAction(kycId: string, approve: boolean, adminName: string) {
