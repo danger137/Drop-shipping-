@@ -50,7 +50,11 @@ export default function RegisterVendorPage() {
       const toastId = toast.loading("Submitting application...");
       try {
         const { submitKycAction } = await import("@/actions/kyc");
-        await submitKycAction(req);
+        const res = await submitKycAction(req);
+        if (res?.error) {
+          toast.error(res.error, { id: toastId });
+          return;
+        }
         toast.success("Application submitted successfully!", { id: toastId });
         setStep(3);
       } catch (error: any) {

@@ -16,7 +16,7 @@ const visionClient = new vision.ImageAnnotatorClient({
 
 export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "date">) {
   if (!data.cnic) {
-    throw new Error("CNIC / ID Card Number is required.");
+    return { error: "CNIC / ID Card Number is required." };
   }
 
   // --- 1. STRICT DUPLICATE CHECKS ---
@@ -32,8 +32,8 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
   });
 
   if (existingUser) {
-    if (existingUser.cnic === data.cnic) throw new Error("An account with this CNIC already exists.");
-    if (existingUser.email === data.email) throw new Error("This email is already registered.");
+    if (existingUser.cnic === data.cnic) return { error: "An account with this CNIC already exists." };
+    if (existingUser.email === data.email) return { error: "This email is already registered." };
   }
 
   // Check KycRequests table for duplicates (CNIC, Email, Phone)
@@ -49,10 +49,10 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
 
   if (existingKyc) {
     if (existingKyc.status === "Pending") {
-      throw new Error("A KYC application with these details is already pending review.");
+      return { error: "A KYC application with these details is already pending review." };
     }
     if (existingKyc.status === "Approved") {
-      throw new Error("An account with these details is already approved.");
+      return { error: "An account with these details is already approved." };
     }
     // If Rejected, they can try again.
   }
@@ -62,7 +62,7 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
   const existingVendorPhone = await db.vendor.findFirst({ where: { phone: data.phone } });
   
   if (existingResellerPhone || existingVendorPhone) {
-    throw new Error("This phone number is already attached to an existing account.");
+    return { error: "This phone number is already attached to an existing account." };
   }
 
   // --- 2. OCR VERIFICATION WITH GOOGLE VISION ---
@@ -82,14 +82,11 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
       const cleanInputCnic = data.cnic.replace(/[\s-]/g, "");
       
       if (!cleanText.includes(cleanInputCnic)) {
-        throw new Error("OCR Verification Failed: The provided CNIC number was not found on the uploaded ID card.");
+        return { error: "OCR Verification Failed: The provided CNIC number was not found on the uploaded ID card." };
       }
     } catch (error: any) {
-      if (error.message.includes("OCR Verification Failed")) {
-        throw error; // Re-throw our custom error
-      }
       console.error("Google Vision API Error:", error);
-      throw new Error("Failed to verify ID card image. Please ensure the image is clear or try again later.");
+      return { error: "Failed to verify ID card image. Please ensure the image is clear or try again later." };
     }
   }
 

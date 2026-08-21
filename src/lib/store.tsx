@@ -350,7 +350,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       logout: () => { signOut({ callbackUrl: "/login" }); },
       submitKyc: async (k: Omit<KycRequest, "id" | "status" | "date">) => {
         try {
-          await submitKycAction(k);
+          const res = await submitKycAction(k);
+          if (res?.error) {
+            toast.error(res.error);
+            throw new Error(res.error);
+          }
           toast.success("KYC submitted successfully");
           await loadData();
         } catch (e: any) {
