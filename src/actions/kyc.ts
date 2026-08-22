@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { type KycRequest } from "@/lib/store";
 import bcrypt from "bcrypt";
 import vision from "@google-cloud/vision";
+import nodemailer from "nodemailer";
 
 // Initialize the Google Cloud Vision client
 // This will automatically pick up GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY from process.env
@@ -91,7 +92,7 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
       }
     }
 
-    // --- 3. UPLOAD IMAGES TO CLOUDINARY ---
+    // --- 3. UPLOAD IMAGES / VIDEO TO CLOUDINARY ---
     let idFrontUrl = data.idFront;
     let idBackUrl = data.idBack;
 
@@ -103,6 +104,31 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
     if (data.idBack && data.idBack.startsWith("data:image")) {
       const { uploadToCloudinary } = await import("@/lib/cloudinary");
       idBackUrl = await uploadToCloudinary(data.idBack, "pakdropship/kyc");
+    }
+
+    // Upload vendor stock video (if present)
+    let stockVideoUrl: string | null = null;
+    if (data.accountType === "vendor" && data.stockVideo && data.stockVideo.startsWith("data:video")) {
+      const { uploadToCloudinary } = await import("@/lib/cloudinary");
+      stockVideoUrl = await uploadToCloudinary(data.stockVideo, "pakdropship/stock-videos");
+    }
+
+    // Upload vendor stock images (if present)
+    let stockImagesJson: string | null = null;
+    if (data.accountType === "vendor" && data.stockImages) {
+      // stockImages is already a JSON string of base64 array from frontend
+      const imagesArr: string[] = JSON.parse(data.stockImages);
+      const { uploadToCloudinary } = await import("@/lib/cloudinary");
+      const uploadedUrls: string[] = [];
+      for (const img of imagesArr) {
+        if (img && img.startsWith("data:image")) {
+          const url = await uploadToCloudinary(img, "pakdropship/stock-images");
+          uploadedUrls.push(url);
+        } else if (img) {
+          uploadedUrls.push(img);
+        }
+      }
+      stockImagesJson = JSON.stringify(uploadedUrls);
     }
 
     // --- 4. CREATE KYC REQUEST ---
@@ -122,9 +148,56 @@ export async function submitKycAction(data: Omit<KycRequest, "id" | "status" | "
         accountNumber: data.accountNumber,
         iban: data.iban,
         accountType: data.accountType,
+        pickupAddress: data.pickupAddress,
+        pickupCity: data.pickupCity,
+        pickupPhone: data.pickupPhone,
+        returnAddress: data.returnAddress,
+        returnCity: data.returnCity,
+        stockVideo: stockVideoUrl,
+        stockImages: stockImagesJson,
         status: "Pending",
       },
     });
+
+    // --- 5. SEND VERIFICATION PENDING EMAIL ---
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: data.email,
+        subject: "Application Under Review - PakDropship",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #2e8b57; text-align: center;">PakDropship Application Received</h2>
+            <p>Dear <strong>${data.name}</strong>,</p>
+            <p>Thank you for applying to join PakDropship as a <strong>${data.accountType === "vendor" ? "Vendor/Supplier" : "Reseller"}</strong>.</p>
+            <p>Your application and KYC documents have been successfully submitted and are currently <strong>under review</strong> by our team. This process usually takes 24 to 48 hours.</p>
+            <p>Once your account is approved, you will receive another email with your login details and further instructions.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      } else {
+        console.log("Email not sent because SMTP credentials are missing in .env");
+      }
+    } catch (emailError) {
+      console.error("Failed to send KYC pending email:", emailError);
+      // Don't fail the KYC process if email fails
+    }
 
     return { success: true, id: newKyc.id };
   } catch (err: any) {
@@ -143,6 +216,40 @@ export async function processKycAction(kycId: string, approve: boolean, adminNam
       where: { id: kycId },
       data: { status: "Rejected", reviewedBy: adminName },
     });
+
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: kyc.email,
+        subject: "Action Required: PakDropship Application Update",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #e53e3e; text-align: center;">Application Status Update</h2>
+            <p>Dear <strong>${kyc.name}</strong>,</p>
+            <p>Thank you for applying to PakDropship.</p>
+            <p>Unfortunately, your application for a <strong>${kyc.accountType === "vendor" ? "Vendor/Supplier" : "Reseller"}</strong> account has been <strong>declined</strong> at this time. This may be due to missing information, invalid documents, or not meeting our current criteria.</p>
+            <p>If you have any questions or wish to appeal this decision, please reply to this email or contact our support team.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    } catch (emailError) {
+      console.error("Failed to send rejection email:", emailError);
+    }
+
     return { success: true };
   }
 
@@ -164,11 +271,17 @@ export async function processKycAction(kycId: string, approve: boolean, adminNam
     const vendor = await db.vendor.create({
       data: {
         name: kyc.name,
-        brandName: `${kyc.name}'s Supply`,
+        brandName: kyc.name,
         phone: kyc.phone,
         bankName: kyc.bankName,
         accountName: kyc.accountName,
         accountNumber: kyc.accountNumber,
+        pickupAddress: kyc.pickupAddress,
+        pickupCity: kyc.pickupCity,
+        pickupPhone: kyc.pickupPhone || kyc.phone,
+        returnAddress: kyc.returnAddress,
+        returnCity: kyc.returnCity,
+        returnPhone: kyc.returnPhone || kyc.phone,
       },
     });
     vendorId = vendor.id;
@@ -203,6 +316,45 @@ export async function processKycAction(kycId: string, approve: boolean, adminNam
     where: { id: kycId },
     data: { status: "Approved", reviewedBy: adminName },
   });
+
+  // 4. Send Approval Email
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "smtp.gmail.com",
+      port: parseInt(process.env.SMTP_PORT || "465"),
+      secure: true,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+
+    const mailOptions = {
+      from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+      to: kyc.email,
+      subject: "Welcome to PakDropship! Your Account is Approved",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+          <h2 style="color: #2e8b57; text-align: center;">Congratulations! 🎉</h2>
+          <p>Dear <strong>${kyc.name}</strong>,</p>
+          <p>We are thrilled to inform you that your application for a <strong>${kyc.accountType === "vendor" ? "Vendor/Supplier" : "Reseller"}</strong> account has been <strong>approved</strong>!</p>
+          <p>Your account is now fully active. You can log in using the email address and password you provided during registration.</p>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/login" style="background-color: #2e8b57; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Go to Login Dashboard</a>
+          </div>
+          
+          <p>If you have any questions, our support team is always here to help.</p>
+          <br>
+          <p>Best Regards,</p>
+          <p><strong>The PakDropship Team</strong></p>
+        </div>
+      `,
+    };
+
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      await transporter.sendMail(mailOptions);
+    }
+  } catch (emailError) {
+    console.error("Failed to send approval email:", emailError);
+  }
 
   return { success: true };
 }

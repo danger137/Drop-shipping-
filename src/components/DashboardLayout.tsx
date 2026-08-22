@@ -34,7 +34,7 @@ export function DashboardLayout({
   onItemChange,
   children,
 }: DashboardLayoutProps) {
-  const { s, me, meVendor, markNotificationsRead } = useStore();
+  const { s, me, meVendor, markNotificationsRead, markSingleNotificationRead } = useStore();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
 
@@ -48,7 +48,8 @@ export function DashboardLayout({
   const unreadCount = myNotifs.filter((n) => !n.read).length;
 
   const handleMarkRead = () => {
-    markNotificationsRead(role === "admin" ? "admin" : me.id);
+    const target = role === "admin" ? "admin" : (role === "vendor" ? meVendor.id : me.id);
+    markNotificationsRead(target);
   };
 
   return (
@@ -224,12 +225,12 @@ export function DashboardLayout({
                       onClick={() => setNotifOpen(false)}
                     />
                     <div className="absolute right-0 mt-2 w-80 md:w-96 bg-white border border-[#EBEAED] rounded-3xl shadow-xl z-50 py-3 flex flex-col card-shadow max-h-[480px]">
-                      <div className="px-4 pb-2 border-b border-[#F4F3F6] flex items-center justify-between">
+                      <div className="px-5 pb-3 border-b border-[#F4F3F6] flex items-center justify-between">
                         <span className="font-extrabold text-sm text-charcoal">Notifications</span>
                         {unreadCount > 0 && (
                           <button
                             onClick={handleMarkRead}
-                            className="text-xs font-semibold text-primary hover:underline"
+                            className="text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 px-3 py-1.5 rounded-lg transition-colors"
                           >
                             Mark all as read
                           </button>
@@ -238,34 +239,60 @@ export function DashboardLayout({
 
                       <div className="overflow-y-auto divide-y divide-[#F4F3F6] flex-1 max-h-[350px]">
                         {myNotifs.length === 0 ? (
-                          <div className="py-12 text-center text-xs text-muted-foreground">
+                          <div className="py-12 text-center text-xs text-muted-foreground flex flex-col items-center">
+                            <Bell className="h-8 w-8 text-muted-foreground/30 mb-2" />
                             No notifications yet.
                           </div>
                         ) : (
-                          myNotifs.map((n) => (
-                            <div
-                              key={n.id}
-                              className={`p-4 transition-colors ${!n.read ? "bg-primary/5" : "hover:bg-[#FAF9FC]"
-                                }`}
-                            >
-                              <div className="flex justify-between items-start gap-2">
-                                <span className={`text-xs font-extrabold ${!n.read ? "text-primary" : "text-charcoal"}`}>
-                                  {n.title}
-                                </span>
-                                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                                  {new Date(n.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                </span>
-                              </div>
-                              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                                {n.message}
-                              </p>
-                              {!n.read && (
-                                <div className="mt-2 flex justify-end">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                          myNotifs.map((n) => {
+                            // Determine which tab to navigate to based on notification content
+                            const getTargetTab = (notif: Notification): string | null => {
+                              const t = (notif.title + " " + notif.message).toLowerCase();
+                              if (t.includes("product") && (t.includes("edit") || t.includes("delete") || t.includes("submitted") || t.includes("approved") || t.includes("rejected") || t.includes("resubmit"))) return "products";
+                              if (t.includes("kyc") || t.includes("registration") || t.includes("vendor") && t.includes("account")) return "kyc";
+                              if (t.includes("unlock") || t.includes("top-up") || t.includes("wallet") || t.includes("credit")) return "unlocks";
+                              if (t.includes("order")) return "orders";
+                              if (t.includes("payout") || t.includes("withdraw")) return "wallet";
+                              if (t.includes("chat") || t.includes("message") || t.includes("support")) return "chat";
+                              return null;
+                            };
+                            const targetTab = getTargetTab(n);
+
+                            return (
+                              <div
+                                key={n.id}
+                                className={`p-4 transition-colors relative cursor-pointer ${!n.read ? "bg-primary/[0.03]" : "hover:bg-[#FAF9FC]"
+                                  }`}
+                                onClick={() => {
+                                  if (!n.read) {
+                                    markSingleNotificationRead(n.id);
+                                  }
+                                  if (targetTab) {
+                                    onItemChange(targetTab);
+                                  }
+                                  setNotifOpen(false);
+                                }}
+                              >
+                                <div className="flex justify-between items-start gap-3">
+                                  <div className="flex items-start gap-2">
+                                    {!n.read && <span className="h-2 w-2 mt-1.5 rounded-full bg-primary shrink-0 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />}
+                                    <span className={`text-sm font-extrabold ${!n.read ? "text-primary" : "text-charcoal"}`}>
+                                      {n.title}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] font-medium text-muted-foreground whitespace-nowrap mt-1">
+                                    {new Date(n.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
                                 </div>
-                              )}
-                            </div>
-                          ))
+                                <p className={`text-xs mt-1.5 leading-relaxed ${!n.read ? "text-charcoal/80 ml-4 font-medium" : "text-muted-foreground"}`}>
+                                  {n.message}
+                                </p>
+                                {targetTab && (
+                                  <span className="text-[10px] text-primary font-semibold mt-1.5 ml-4 block">Click to view →</span>
+                                )}
+                              </div>
+                            );
+                          })
                         )}
                       </div>
                     </div>

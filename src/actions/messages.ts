@@ -113,3 +113,13 @@ export async function markNotificationsReadAction(target: string) {
     data: { read: true },
   });
 }
+
+/**
+ * Mark a single notification as read.
+ */
+export async function markSingleNotificationReadAction(id: string) {
+  await db.notification.update({
+    where: { id },
+    data: { read: true },
+  });
+}

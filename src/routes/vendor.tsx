@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   LayoutDashboard, Package, PlusCircle, User, MessageSquareCode,
   Upload, CheckCircle2, Clock, XCircle, Send, Bell, Paperclip, Mic, Search,
-  Wallet, ShoppingCart, Download, Image as ImageIcon
+  Wallet, ShoppingCart, Download, Image as ImageIcon, Trash2
 } from "lucide-react";
 import { toast } from "sonner";
 import { useStore, PKR, fileToDataUrl, type Vendor } from "@/lib/store";
@@ -23,26 +23,23 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { SEED_CATEGORIES } from "@/lib/seed";
 
 export default function VendorPage() {
-  const { s, meVendor, setCurrentVendor, updateVendorProfile, submitVendorProduct, send, markNotificationsRead } = useStore();
+  const { s, meVendor, setCurrentVendor, updateVendorProfile, submitVendorProduct, send, markNotificationsRead, isDataLoading } = useStore();
   const [tab, setTab] = useState("dashboard");
   const router = useRouter();
 
   useEffect(() => {
+    if (isDataLoading) return;
     if (s.role === "guest") {
       router.replace("/login");
     } else if (s.role !== "vendor" && s.role !== "admin") {
       router.replace("/app");
     }
-  }, [s.role, router]);
-
-  if (s.role === "guest" || (s.role !== "vendor" && s.role !== "admin")) {
-    return null;
-  }
+  }, [s.role, isDataLoading, router]);
 
   // My products = products with vendorId === current vendor
   const myProducts = useMemo(() =>
-    s.products.filter(p => p.vendorId === meVendor.id),
-    [s.products, meVendor.id]
+    !meVendor ? [] : s.products.filter(p => p.vendorId === meVendor.id && p.approvalStatus !== "DELETED" && p.rejectionReason !== "Deleted by vendor"),
+    [s.products, meVendor?.id]
   );
 
   const approvedCount = myProducts.filter(p => p.approvalStatus === "APPROVED").length;
@@ -50,20 +47,21 @@ export default function VendorPage() {
   const rejectedCount = myProducts.filter(p => p.approvalStatus === "REJECTED").length;
 
   const myVendorOrders = useMemo(() => {
+    if (!meVendor) return [];
     return s.orders.filter(o => {
       const p = s.products.find(x => x.id === o.productId);
       return p && p.vendorId === meVendor.id;
     });
-  }, [s.orders, s.products, meVendor.id]);
+  }, [s.orders, s.products, meVendor?.id]);
 
-  const vendorSales = s.ledger.filter(l => l.vendorId === meVendor.id && l.tag === "Sale").reduce((a, b) => a + b.amount, 0);
+  const vendorSales = !meVendor ? 0 : s.ledger.filter(l => l.vendorId === meVendor.id && l.tag === "Sale").reduce((a, b) => a + b.amount, 0);
 
   // Notifications for this vendor
-  const myNotifs = s.notifications.filter(n => n.target === meVendor.id);
+  const myNotifs = !meVendor ? [] : s.notifications.filter(n => n.target === meVendor.id);
   const unreadNotifs = myNotifs.filter(n => !n.read).length;
 
   // Messages for this vendor
-  const myMessages = s.messages.filter(m => m.resellerId === meVendor.id);
+  const myMessages = !meVendor ? [] : s.messages.filter(m => m.resellerId === meVendor.id);
 
   const pendingKycCount = 0; // not used here but required for sidebar badge type
 
@@ -76,6 +74,10 @@ export default function VendorPage() {
     { id: "profile", label: "My Profile", icon: User },
     { id: "chat", label: "Support Chat", icon: MessageSquareCode, badge: unreadNotifs },
   ];
+
+  if (s.role === "guest" || (s.role !== "vendor" && s.role !== "admin") || !meVendor) {
+    return null;
+  }
 
   return (
     <DashboardLayout
@@ -186,9 +188,12 @@ function VendorDashboard({ myProducts, approvedCount, pendingCount, rejectedCoun
   );
 }
 
-// ─── Products Tab ───────────────────────────────────────────────────────────────
 function VendorProducts({ myProducts }: { myProducts: any[] }) {
+  const { s, requestProductDelete } = useStore();
   const [q, setQ] = useState("");
+  const [editingProduct, setEditingProduct] = useState<any>(null);
+  const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
+
   const list = myProducts.filter((p) => p.title.toLowerCase().includes(q.toLowerCase()));
 
   return (
@@ -215,12 +220,13 @@ function VendorProducts({ myProducts }: { myProducts: any[] }) {
                   <TableHead className="w-[110px]">Suggested</TableHead>
                   <TableHead className="w-[90px]">Stock</TableHead>
                   <TableHead className="text-right w-[140px]">Status</TableHead>
+                  <TableHead className="text-right w-[120px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {list.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">No matching products found.</TableCell>
+                    <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">No matching products found.</TableCell>
                   </TableRow>
                 ) : (
                   list.map((p) => (
@@ -234,7 +240,7 @@ function VendorProducts({ myProducts }: { myProducts: any[] }) {
                       </TableCell>
                       <TableCell>
                         <span className="inline-flex rounded-full bg-surface px-2.5 py-1 text-xs font-semibold text-muted-foreground border border-border/60 truncate max-w-[120px]">
-                          {SEED_CATEGORIES.find((c) => c.id === p.categoryId)?.title ?? "—"}
+                          {s.categories.find((c) => c.id === p.categoryId)?.title ?? "—"}
                         </span>
                       </TableCell>
                       <TableCell className="font-bold text-charcoal">{PKR(p.wholesale)}</TableCell>
@@ -249,6 +255,34 @@ function VendorProducts({ myProducts }: { myProducts: any[] }) {
                       </TableCell>
                       <TableCell className="text-right space-x-2">
                         <ApprovalBadge status={p.approvalStatus} />
+                        {s.productActionRequests.some(r => r.productId === p.id && r.status === "PENDING" && r.type === "EDIT") && (
+                          <Badge variant="outline" className="text-[10px] mt-1 border-primary text-primary">Pending Edit</Badge>
+                        )}
+                        {s.productActionRequests.some(r => r.productId === p.id && r.status === "PENDING" && r.type === "DELETE") && (
+                          <Badge variant="outline" className="text-[10px] mt-1 border-destructive text-destructive">Pending Delete</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setEditingProduct(p)}
+                            disabled={s.productActionRequests.some(r => r.productId === p.id && r.status === "PENDING")}
+                            className="h-8 w-8 hover:text-primary"
+                          >
+                            <MessageSquareCode className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setDeletingProductId(p.id)}
+                            disabled={s.productActionRequests.some(r => r.productId === p.id && r.status === "PENDING")}
+                            className="h-8 w-8 hover:text-destructive hover:bg-destructive/10"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -258,34 +292,70 @@ function VendorProducts({ myProducts }: { myProducts: any[] }) {
           </div>
         </div>
       </div>
+
+      {editingProduct && (
+        <Dialog open={!!editingProduct} onOpenChange={(open) => !open && setEditingProduct(null)}>
+          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Edit Product: {editingProduct.title}</DialogTitle>
+            </DialogHeader>
+            <AddProductForm
+              meVendor={s.vendors.find(v => v.id === editingProduct.vendorId) || ({} as any)}
+              onSuccess={() => setEditingProduct(null)}
+              initialData={editingProduct}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {deletingProductId && (
+        <Dialog open={!!deletingProductId} onOpenChange={(open) => !open && setDeletingProductId(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Request Product Deletion</DialogTitle>
+            </DialogHeader>
+            <div className="py-4 text-sm text-muted-foreground">
+              Are you sure you want to delete this product? This will send a deletion request to the admin for approval.
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button variant="outline" onClick={() => setDeletingProductId(null)}>Cancel</Button>
+              <Button variant="destructive" onClick={async () => {
+                await requestProductDelete(deletingProductId);
+                setDeletingProductId(null);
+              }}>Request Deletion</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
 
-// ─── Add Product Tab ─────────────────────────────────────────────────────────────
-function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: () => void }) {
-  const { submitVendorProduct, s } = useStore();
-  const [title, setTitle] = useState("");
-  const [desc, setDesc] = useState("");
-  const [wholesale, setWholesale] = useState("");
-  const [suggested, setSuggested] = useState("");
-  const [minSellingPrice, setMinSellingPrice] = useState("");
-  const [stock, setStock] = useState("");
-  const [weight, setWeight] = useState("");
-  const [lowStockThreshold, setLowStockThreshold] = useState("5");
-  const [categoryId, setCategoryId] = useState(s.categories[0]?.id ?? "");
-  const [colors, setColors] = useState<string[]>([]);
-  const [colorPricing, setColorPricing] = useState<Record<string, number>>({});
-  const [colorImages, setColorImages] = useState<Record<string, string>>({});
-  const [sizes, setSizes] = useState<string[]>([]);
-  const [sizePricing, setSizePricing] = useState<Record<string, number>>({});
-  const [hook, setHook] = useState("");
+function AddProductForm({ meVendor, onSuccess, initialData }: { meVendor: Vendor; onSuccess: () => void; initialData?: any }) {
+  const { submitVendorProduct, requestProductEdit, s } = useStore();
+  const [title, setTitle] = useState(initialData?.title || "");
+  const [desc, setDesc] = useState(initialData?.description || "");
+  const [wholesale, setWholesale] = useState(initialData?.wholesale?.toString() || "");
+  const [suggested, setSuggested] = useState(initialData?.suggested?.toString() || "");
+  const [minSellingPrice, setMinSellingPrice] = useState(initialData?.minSellingPrice?.toString() || "");
+  const [stock, setStock] = useState(initialData?.stock?.toString() || "");
+  const [weight, setWeight] = useState(initialData?.weight?.toString() || "");
+  const [lowStockThreshold, setLowStockThreshold] = useState(initialData?.lowStockThreshold?.toString() || "5");
+  const [categoryId, setCategoryId] = useState(initialData?.categoryId || s.categories[0]?.id || "");
+  const [colors, setColors] = useState<string[]>(initialData?.colors || []);
+  const [colorPricing, setColorPricing] = useState<Record<string, number>>(initialData?.colorPricing || {});
+  const [colorImages, setColorImages] = useState<Record<string, string>>(initialData?.colorImages || {});
+  const [sizes, setSizes] = useState<string[]>(initialData?.sizes || []);
+  const [sizePricing, setSizePricing] = useState<Record<string, number>>(initialData?.sizePricing || {});
+  const [hook, setHook] = useState(initialData?.hook || "");
   const [colorInput, setColorInput] = useState("");
   const [colorPriceInput, setColorPriceInput] = useState<number>(0);
   const [sizeInput, setSizeInput] = useState("");
   const [sizePriceInput, setSizePriceInput] = useState<number>(0);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<string[]>(initialData?.images || []);
+  const [videoUrl, setVideoUrl] = useState(initialData?.videoUrl || "");
   const [loading, setLoading] = useState(false);
+  const [videoLoading, setVideoLoading] = useState(false);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -295,6 +365,17 @@ function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: 
       setImages(prev => [...prev, ...urls].slice(0, 5));
     } catch { toast.error("Failed to read images."); }
     setLoading(false);
+  };
+
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setVideoLoading(true);
+    try {
+      const url = await fileToDataUrl(f);
+      setVideoUrl(url);
+    } catch { toast.error("Failed to read video."); }
+    setVideoLoading(false);
   };
 
   const addChip = (field: "colors" | "sizes", name: string, price: number) => {
@@ -342,17 +423,42 @@ function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: 
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !wholesale || !suggested || !weight || images.length === 0) {
       return toast.error("Title, pricing, weight, and at least one image are required.");
     }
-    submitVendorProduct({
-      title, description: desc, wholesale: Number(wholesale), suggested: Number(suggested), minSellingPrice: Number(minSellingPrice) || undefined,
-      stock: Number(stock) || 0, weight: Number(weight), lowStockThreshold: Number(lowStockThreshold), categoryId, images, colors, sizes, hook, vendorId: meVendor.id, isActive: false,
-      colorPricing, sizePricing, colorImages
-    });
-    toast.success("Product submitted for admin approval!");
+    setLoading(true);
+    const productData = {
+      title,
+      description: desc,
+      wholesale: parseFloat(wholesale),
+      suggested: parseFloat(suggested),
+      minSellingPrice: minSellingPrice ? parseFloat(minSellingPrice) : undefined,
+      stock: parseInt(stock) || 0,
+      weight: parseFloat(weight),
+      lowStockThreshold: parseInt(lowStockThreshold) || 5,
+      categoryId,
+      colors,
+      colorPricing,
+      colorImages,
+      sizes,
+      sizePricing,
+      hook,
+      images,
+      videoUrl,
+      vendorId: meVendor.id
+    };
+
+    if (initialData) {
+      await requestProductEdit(initialData.id, productData);
+      toast.success("Edit request submitted for admin approval!");
+    } else {
+      await submitVendorProduct(productData);
+      toast.success("Product submitted for admin approval!");
+    }
+    
+    setLoading(false);
     onSuccess();
   };
 
@@ -442,10 +548,15 @@ function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: 
               <div className="flex flex-wrap gap-2 mt-2">
                 {sizes.length === 0 && <span className="text-xs text-muted-foreground">No sizes added — size dropdown won't show on order form.</span>}
                 {sizes.map((s) => (
-                  <Badge key={s} variant="secondary" className="px-3 py-1 text-sm bg-surface flex items-center gap-2">
-                    {s} {sizePricing[s] ? `(PKR ${sizePricing[s]})` : ""}
-                    <button type="button" onClick={() => removeChip("sizes", s)} className="hover:text-destructive"><XCircle className="h-3.5 w-3.5" /></button>
-                  </Badge>
+                  <div key={s} className="p-3 bg-surface border border-border rounded-xl flex items-center justify-between gap-4 max-w-xs">
+                    <div className="flex flex-col">
+                      <span className="font-bold text-sm text-charcoal">{s}</span>
+                      {sizePricing[s] ? <span className="text-xs text-muted-foreground">PKR {sizePricing[s]}</span> : <span className="text-xs text-muted-foreground">Standard Price</span>}
+                    </div>
+                    <button type="button" onClick={() => removeChip("sizes", s)} className="text-muted-foreground hover:text-destructive transition-colors">
+                      <XCircle className="h-5 w-5" />
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -454,7 +565,7 @@ function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: 
             <Label>Sales Hook / Tagline</Label>
             <Input value={hook} onChange={e => setHook(e.target.value)} className="mt-1.5" placeholder="e.g. Best quality at unbeatable price!" />
           </div>
-          <div className="md:col-span-2">
+          <div className="md:col-span-1">
             <Label>Product Images (up to 5)</Label>
             <label className="mt-1.5 flex flex-col items-center justify-center border-2 border-dashed border-border/60 bg-surface h-32 cursor-pointer hover:border-primary transition-colors rounded-xl">
               {loading ? <span className="text-sm text-muted-foreground">Uploading...</span> : (
@@ -470,6 +581,21 @@ function AddProductForm({ meVendor, onSuccess }: { meVendor: Vendor; onSuccess: 
                     <button type="button" onClick={() => setImages(prev => prev.filter((_, j) => j !== i))} className="absolute -top-1 -right-1 h-5 w-5 bg-destructive text-white rounded-full text-[10px] flex items-center justify-center">✕</button>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+          <div className="md:col-span-1">
+            <Label>Product Video (Optional)</Label>
+            <label className="mt-1.5 flex flex-col items-center justify-center border-2 border-dashed border-border/60 bg-surface h-32 cursor-pointer hover:border-primary transition-colors rounded-xl">
+              {videoLoading ? <span className="text-sm text-muted-foreground">Uploading...</span> : (
+                <div className="text-center"><Upload className="h-6 w-6 mx-auto text-muted-foreground" /><span className="text-xs text-muted-foreground mt-2 block">Click to upload video</span></div>
+              )}
+              <input type="file" className="hidden" accept="video/*" onChange={handleVideoUpload} />
+            </label>
+            {videoUrl && (
+              <div className="relative mt-3 inline-block w-48">
+                <video src={videoUrl} className="w-full aspect-video object-contain bg-black rounded-xl border border-border" controls />
+                <button type="button" onClick={() => setVideoUrl("")} className="absolute -top-2 -right-2 z-10 h-6 w-6 bg-destructive hover:bg-destructive/90 text-white rounded-full shadow-md text-xs flex items-center justify-center transition-transform hover:scale-105">✕</button>
               </div>
             )}
           </div>

@@ -682,9 +682,10 @@ const emptyProduct = (categoryId: string): Product => ({
 });
 
 function ProductsAdmin() {
-  const { s, saveProduct, deleteProduct, approveVendorProduct, rejectVendorProduct } = useStore();
+  const { s, saveProduct, deleteProduct, approveVendorProduct, rejectVendorProduct, approveProductAction, rejectProductAction } = useStore();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Product>(emptyProduct(s.categories[0]?.id ?? "c1"));
+  const [viewRequest, setViewRequest] = useState<any>(null);
   const [q, setQ] = useState("");
   const [colorInput, setColorInput] = useState("");
   const [colorPriceInput, setColorPriceInput] = useState<number>(0);
@@ -744,7 +745,7 @@ function ProductsAdmin() {
   };
 
   const pendingList = s.products.filter(p => p.approvalStatus === "PENDING_ADMIN_APPROVAL" && p.title.toLowerCase().includes(q.toLowerCase()));
-  const activeList = s.products.filter((p) => p.approvalStatus !== "PENDING_ADMIN_APPROVAL" && p.title.toLowerCase().includes(q.toLowerCase()));
+  const activeList = s.products.filter((p) => p.approvalStatus !== "PENDING_ADMIN_APPROVAL" && p.approvalStatus !== "DELETED" && p.rejectionReason !== "Deleted by vendor" && p.rejectionReason !== "Deleted by admin" && p.title.toLowerCase().includes(q.toLowerCase()));
 
   return (
     <div className="space-y-6">
@@ -760,6 +761,63 @@ function ProductsAdmin() {
           </Button>
         </div>
       </div>
+
+      {s.productActionRequests?.length > 0 && (
+        <div className="mb-6">
+          <h2 className="text-lg font-black text-blue-500 mb-3 flex items-center gap-2"><MessageSquareCode className="h-5 w-5" /> Vendor Edit/Delete Requests</h2>
+          <div className="overflow-hidden rounded-3xl border border-blue-200 bg-blue-50/30 card-shadow">
+            <div className="w-full overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Vendor</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Details</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {s.productActionRequests.map(r => (
+                    <TableRow key={r.id}>
+                      <TableCell className="flex items-center gap-3">
+                        <img src={r.product?.images?.[0] || ""} alt="" className="h-11 w-11 shrink-0 rounded-2xl object-cover border border-border shadow-sm" />
+                        <div className="min-w-0">
+                          <span className="font-bold text-charcoal block truncate max-w-[14rem]">{r.product?.title || "Unknown"}</span>
+                          <span className="text-xs text-muted-foreground truncate block max-w-[14rem]">SKU: {r.product?.sku || "N/A"}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className="font-semibold text-charcoal">{r.vendor?.brandName || r.vendorId}</span>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={r.type === "DELETE" ? "border-destructive text-destructive" : "border-primary text-primary"}>
+                          {r.type}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        {r.type === "EDIT" ? (
+                          <span className="text-xs text-muted-foreground">Vendor wants to update details (Price, Stock, etc.)</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Vendor wants to remove this product.</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right space-x-2">
+                        <Button size="sm" variant="outline" className="rounded-xl" onClick={() => setViewRequest(r)}>View</Button>
+                        <Button size="sm" variant="default" className="bg-green-600 hover:bg-green-700 text-white rounded-xl" onClick={() => approveProductAction(r.id)}>Approve</Button>
+                        <Button size="sm" variant="destructive" className="rounded-xl" onClick={() => {
+                          const reason = prompt("Enter reason for rejection:");
+                          if (reason) rejectProductAction(r.id, reason);
+                        }}>Reject</Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {pendingList.length > 0 && (
         <div className="mb-6">
@@ -1007,6 +1065,140 @@ function ProductsAdmin() {
               Save Product
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!viewRequest} onOpenChange={(o) => !o && setViewRequest(null)}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Request Details</DialogTitle>
+          </DialogHeader>
+          {viewRequest && (() => {
+            const product = viewRequest.product;
+            const parsedData = (() => {
+              try {
+                return viewRequest.requestedData ? JSON.parse(viewRequest.requestedData) : null;
+              } catch { return null; }
+            })();
+
+            // Friendly labels for fields
+            const fieldLabels: Record<string, string> = {
+              title: "Product Title", description: "Description", wholesale: "Wholesale Price (PKR)",
+              suggested: "Suggested Price (PKR)", minSellingPrice: "Min Selling Price (PKR)",
+              stock: "Stock", weight: "Weight (g)", hook: "Sales Hook", categoryId: "Category",
+              lowStockThreshold: "Low Stock Alert", colors: "Colors", sizes: "Sizes",
+              colorPricing: "Color Pricing", sizePricing: "Size Pricing", images: "Images",
+              videoUrl: "Video", colorImages: "Color Images",
+            };
+
+            const formatVal = (val: any, key: string): string => {
+              if (val === null || val === undefined || val === "") return "—";
+              if (Array.isArray(val)) return val.length === 0 ? "None" : val.join(", ");
+              if (typeof val === "object") return Object.entries(val).map(([k, v]) => `${k}: PKR ${v}`).join(", ");
+              if (key === "wholesale" || key === "suggested" || key === "minSellingPrice") return `PKR ${val}`;
+              if (key === "weight") return `${val}g`;
+              return String(val);
+            };
+
+            return (
+              <div className="space-y-5">
+                {/* Header */}
+                <div className="flex items-center gap-4 border-b border-border/40 pb-4">
+                  {product?.images?.[0] && (
+                    <img src={product.images[0]} alt="" className="h-16 w-16 object-cover rounded-xl border border-border shadow-sm" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-lg text-charcoal">{product?.title}</p>
+                    <p className="text-sm text-muted-foreground">Vendor: <span className="font-semibold text-charcoal">{viewRequest.vendor?.brandName}</span></p>
+                    <p className="text-xs text-muted-foreground mt-0.5">SKU: {product?.sku || "N/A"}</p>
+                  </div>
+                  <Badge className="ml-auto shrink-0" variant={viewRequest.type === "DELETE" ? "destructive" : "default"}>{viewRequest.type}</Badge>
+                </div>
+
+                {viewRequest.type === "DELETE" ? (
+                  <div className="py-6 text-center">
+                    <Trash2 className="mx-auto h-12 w-12 text-destructive/40 mb-3" />
+                    <p className="text-charcoal font-medium">The vendor has requested to delete this product from the catalog.</p>
+                    <p className="text-sm text-muted-foreground mt-1">Approving this will permanently remove the product.</p>
+                  </div>
+                ) : parsedData ? (
+                  <div className="space-y-3">
+                    <h4 className="font-bold text-charcoal text-sm flex items-center gap-2">
+                      <MessageSquareCode className="h-4 w-4 text-primary" /> Proposed Changes
+                    </h4>
+                    <div className="rounded-xl border border-border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="bg-surface border-b border-border">
+                            <th className="text-left px-4 py-2.5 text-xs font-bold text-muted-foreground uppercase tracking-wider w-[30%]">Field</th>
+                            <th className="text-left px-4 py-2.5 text-xs font-bold text-muted-foreground uppercase tracking-wider w-[35%]">Current</th>
+                            <th className="text-left px-4 py-2.5 text-xs font-bold text-muted-foreground uppercase tracking-wider w-[35%]">New Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.keys(parsedData)
+                            .filter(key => key !== "vendorId" && key !== "images" && key !== "colorImages" && key !== "videoUrl")
+                            .map(key => {
+                              const oldVal = product?.[key];
+                              const newVal = parsedData[key];
+                              const changed = JSON.stringify(oldVal) !== JSON.stringify(newVal);
+                              return (
+                                <tr key={key} className={`border-b border-border/40 ${changed ? "bg-amber-50/50" : ""}`}>
+                                  <td className="px-4 py-2.5 font-semibold text-charcoal text-xs">{fieldLabels[key] || key}</td>
+                                  <td className="px-4 py-2.5 text-xs text-muted-foreground">{formatVal(oldVal, key)}</td>
+                                  <td className={`px-4 py-2.5 text-xs font-semibold ${changed ? "text-primary" : "text-muted-foreground"}`}>
+                                    {formatVal(newVal, key)}
+                                    {changed && <span className="ml-1.5 inline-block text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full font-bold">Changed</span>}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Image comparison */}
+                    {parsedData.images && (
+                      <div className="space-y-2 pt-2">
+                        <h5 className="text-xs font-bold text-charcoal">New Images:</h5>
+                        <div className="flex gap-2 flex-wrap">
+                          {(Array.isArray(parsedData.images) ? parsedData.images : []).map((img: string, i: number) => (
+                            <img key={i} src={img} alt={`New ${i+1}`} className="h-16 w-16 object-cover rounded-xl border border-primary/40 shadow-sm" />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Video */}
+                    {parsedData.videoUrl && (
+                      <div className="space-y-2 pt-2">
+                        <h5 className="text-xs font-bold text-charcoal">New Video:</h5>
+                        <video src={parsedData.videoUrl} controls className="w-full max-h-48 object-contain rounded-xl border border-border bg-black" />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="py-4 text-center text-muted-foreground text-sm">No change data available.</div>
+                )}
+
+                {/* Actions */}
+                <div className="flex justify-end gap-3 pt-4 border-t border-border/40">
+                  <Button variant="outline" onClick={() => setViewRequest(null)}>Close</Button>
+                  <Button variant="destructive" onClick={() => {
+                    const reason = prompt("Enter reason for rejection:");
+                    if (reason) {
+                      rejectProductAction(viewRequest.id, reason);
+                      setViewRequest(null);
+                    }
+                  }}>Reject</Button>
+                  <Button className="bg-green-600 hover:bg-green-700 text-white" onClick={() => {
+                    approveProductAction(viewRequest.id);
+                    setViewRequest(null);
+                  }}>Approve</Button>
+                </div>
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
     </div>
@@ -1397,7 +1589,12 @@ function RegistrationsAdmin() {
             <div className="p-5 border-b border-border/60">
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <h4 className="font-black text-charcoal">{k.name}</h4>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-black text-charcoal">{k.name}</h4>
+                    <Badge variant="outline" className="text-[10px] bg-white border-primary/20 text-primary">
+                      {k.accountType === "vendor" ? "Vendor" : "Reseller"}
+                    </Badge>
+                  </div>
                   <p className="text-xs text-muted-foreground">{k.email}</p>
                 </div>
                 <Badge variant={k.status === "Pending" ? "default" : k.status === "Approved" ? "secondary" : "destructive"}>
@@ -1440,6 +1637,34 @@ function RegistrationsAdmin() {
                   <p className="text-xs mt-0.5 text-charcoal font-medium"><span className="text-muted-foreground">A/C:</span> {k.accountNumber}</p>
                   {k.iban && <p className="text-xs mt-0.5 text-charcoal font-medium"><span className="text-muted-foreground">IBAN:</span> {k.iban}</p>}
                 </div>
+                {k.accountType === "vendor" && (k.stockVideo || k.stockImages) && (
+                  <div className="pt-3 border-t border-border/40">
+                    <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-2 block">Vendor Setup & Stock</span>
+                    {k.stockVideo && (
+                      <div className="mb-3">
+                        <span className="text-xs text-charcoal font-medium block mb-1">Stock Video</span>
+                        <video src={k.stockVideo} controls className="w-full aspect-video max-h-48 object-contain rounded-lg border border-border bg-black" />
+                      </div>
+                    )}
+                    {k.stockImages && (
+                      <div>
+                        <span className="text-xs text-charcoal font-medium block mb-1">Stock Images</span>
+                        <div className="flex flex-wrap gap-2">
+                          {(() => {
+                            try {
+                              const imgs = typeof k.stockImages === 'string' ? JSON.parse(k.stockImages) : k.stockImages;
+                              return imgs.map((img: string, i: number) => (
+                                <div key={i} className="h-10 w-10 rounded border border-border overflow-hidden cursor-zoom-in" onClick={() => setViewImg(img)}>
+                                  <img src={img} alt={`Stock ${i+1}`} className="w-full h-full object-cover" />
+                                </div>
+                              ));
+                            } catch { return <span className="text-xs text-muted-foreground">Invalid images</span>; }
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1456,7 +1681,7 @@ function RegistrationsAdmin() {
                 <Button className="flex-1 rounded-none bg-emerald-600 hover:bg-emerald-700 text-white shadow-md" onClick={async () => { 
                   try {
                     await approveKyc(k.id); 
-                    toast.success("Reseller account created & approved!"); 
+                    toast.success(`${k.accountType === "vendor" ? "Vendor" : "Reseller"} account created & approved!`); 
                   } catch (e) {} // Error toast handled in store
                 }}>
                   <CheckCircle2 className="w-4 h-4 mr-2" /> Approve

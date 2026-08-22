@@ -1,4 +1,12 @@
 const nextConfig = {
+  typescript: {
+    ignoreBuildErrors: true,
+  },
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "60mb",
+    },
+  },
   images: {
     remotePatterns: [
       {

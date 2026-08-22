@@ -27,6 +27,29 @@ model User {
   @@index([role])
 }
 
+// ─────────────────────────────────────────────
+// PRODUCT ACTION REQUESTS (Edit/Delete)
+// ─────────────────────────────────────────────
+
+model ProductActionRequest {
+  id             String   @id @default(cuid())
+  productId      String
+  vendorId       String
+  type           String   // "EDIT" | "DELETE"
+  requestedData  String?  @db.Text // JSON string containing the new product data for EDIT requests
+  status         String   @default("PENDING") // "PENDING" | "APPROVED" | "REJECTED"
+  adminReason    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  product        Product  @relation(fields: [productId], references: [id])
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+
+  @@index([vendorId])
+  @@index([productId])
+  @@index([status])
+}
+
 model KycRequest {
   id            String   @id @default(cuid())
   email         String
@@ -51,10 +74,20 @@ model KycRequest {
   pickupPhone        String?
   returnAddress      String?
   returnCity         String?
+  stockVideo         String?
+  stockImages        String?   // JSON array of 5 stock image URLs
   createdAt     DateTime @default(now())
 
   @@index([status])
   @@index([accountType])
+}
+
+model OtpToken {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 }
 
 // ─────────────────────────────────────────────
@@ -152,6 +185,7 @@ model Vendor {
 
   user            User?
   products        Product[]
+  actionRequests  ProductActionRequest[]
   ledgers         Ledger[]
   payouts         Payout[]
   stockMovements  StockMovement[]
@@ -213,6 +247,7 @@ model Product {
   orders             Order[]
   stockMovements     StockMovement[]
   shopifyMappings    ShopifyMapping[]
+  actionRequests     ProductActionRequest[]
 
   @@index([vendorId])
   @@index([categoryId])

@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { logAdminAction } from "./audit";
+import nodemailer from "nodemailer";
 
 /**
  * Auto-generate a unique SKU for a vendor product.
@@ -26,8 +27,35 @@ async function generateSku(vendorId: string, categoryId: string): Promise<string
 
   // Vendor short ID
   const vShort = vendorId.substring(vendorId.length - 4).toUpperCase();
+  return `PD-V${vShort}-${catCode}-${seq}`;
+}
 
-  return `PD-${vShort}-${catCode}-${seq}`;
+/**
+ * Helper to resolve vendor email and name from either Vendor or User model
+ */
+async function resolveVendorEmail(vendorId: string): Promise<{ email: string | null; name: string }> {
+  try {
+    const vendor = await db.vendor.findUnique({
+      where: { id: vendorId },
+      select: { email: true, name: true, brandName: true }
+    });
+    if (vendor?.email && vendor.email.includes("@")) {
+      return { email: vendor.email, name: vendor.name || vendor.brandName || "Vendor" };
+    }
+
+    const user = await db.user.findFirst({
+      where: { vendorId },
+      select: { email: true }
+    });
+    if (user?.email && user.email.includes("@")) {
+      return { email: user.email, name: vendor?.name || "Vendor" };
+    }
+
+    return { email: vendor?.email || user?.email || null, name: vendor?.name || "Vendor" };
+  } catch (e) {
+    console.error("Error resolving vendor email:", e);
+    return { email: null, name: "Vendor" };
+  }
 }
 
 /**
@@ -36,6 +64,7 @@ async function generateSku(vendorId: string, categoryId: string): Promise<string
 export async function submitVendorProduct(data: {
   title: string;
   categoryId: string;
+  vendorId?: string;
   description?: string;
   brand?: string;
   hook?: string;
@@ -57,9 +86,8 @@ export async function submitVendorProduct(data: {
   lowStockThreshold?: number;
 }) {
   const session = await getServerSession(authOptions);
-  if (!session?.user?.vendorId) throw new Error("Vendor not found");
-
-  const vendorId = session.user.vendorId;
+  const vendorId = session?.user?.vendorId || data.vendorId;
+  if (!vendorId) throw new Error("Vendor not found");
 
   // Validation
   if (!data.title || data.title.trim().length < 3) {
@@ -117,7 +145,7 @@ export async function submitVendorProduct(data: {
     },
   });
 
-  // Notify admin
+  // Notify admin in-app
   await db.notification.create({
     data: {
       target: "admin",
@@ -126,6 +154,46 @@ export async function submitVendorProduct(data: {
       type: "info",
     },
   });
+
+  // Send Email to Vendor
+  try {
+    const vendorEmail = session?.user?.email;
+    const vendorName = session?.user?.name || "Vendor";
+
+    if (vendorEmail) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: vendorEmail,
+        subject: "Product Submitted for Approval - PakDropship",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #f59e0b; text-align: center;">Product Pending Approval ⏳</h2>
+            <p>Dear <strong>${vendorName}</strong>,</p>
+            <p>Thank you for submitting a new product to PakDropship.</p>
+            <p>Your product <strong>"${data.title}"</strong> (SKU: ${sku}) has been successfully uploaded and is currently <strong>Pending Admin Approval</strong>.</p>
+            <p>Our admin team has been notified and will review your product shortly. Once it is approved, it will automatically go live on the platform for resellers to sell.</p>
+            <p>We will notify you again once the status of your product changes.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    }
+  } catch (emailError) {
+    console.error("Failed to send product pending email:", emailError);
+  }
 
   return product;
 }
@@ -162,6 +230,39 @@ export async function approveVendorProduct(productId: string) {
         type: "success",
       },
     });
+
+    try {
+      const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(product.vendorId);
+
+      if (vendorEmail) {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST || "smtp.gmail.com",
+          port: parseInt(process.env.SMTP_PORT || "465"),
+          secure: true,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+          to: vendorEmail,
+          subject: "Product Approved - PakDropship",
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+              <h2 style="color: #10b981; text-align: center;">Product Approved! 🎉</h2>
+              <p>Dear <strong>${vendorName}</strong>,</p>
+              <p>Great news! Your product <strong>"${product.title}"</strong> has been approved by our admin team.</p>
+              <p>It is now live on PakDropship and available for resellers to add to their stores and sell.</p>
+              <p>Keep adding great products and grow your sales!</p>
+              <br>
+              <p>Best Regards,</p>
+              <p><strong>The PakDropship Team</strong></p>
+            </div>
+          `,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to send product approval email:", e);
+    }
   }
 
   await logAdminAction({
@@ -211,6 +312,39 @@ export async function rejectVendorProduct(productId: string, reason: string) {
         type: "error",
       },
     });
+
+    try {
+      const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(product.vendorId);
+
+      if (vendorEmail) {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST || "smtp.gmail.com",
+          port: parseInt(process.env.SMTP_PORT || "465"),
+          secure: true,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+          to: vendorEmail,
+          subject: "Product Rejected - PakDropship",
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+              <h2 style="color: #ef4444; text-align: center;">Product Rejected ❌</h2>
+              <p>Dear <strong>${vendorName}</strong>,</p>
+              <p>Your submitted product <strong>"${product.title}"</strong> was reviewed and could not be approved at this time.</p>
+              <p><strong>Reason:</strong> ${reason}</p>
+              <p>Please update the product according to the feedback and resubmit it for approval.</p>
+              <br>
+              <p>Best Regards,</p>
+              <p><strong>The PakDropship Team</strong></p>
+            </div>
+          `,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to send product rejection email:", e);
+    }
   }
 
   await logAdminAction({
@@ -310,6 +444,392 @@ export async function resubmitVendorProduct(productId: string, updates: {
       type: "info",
     },
   });
+
+  return { success: true };
+}
+
+/**
+ * Request an edit for an existing product (Requires Admin Approval)
+ */
+export async function requestProductEdit(productId: string, requestedData: any) {
+  const session = await getServerSession(authOptions);
+  
+  const product = await db.product.findUnique({ where: { id: productId } });
+  if (!product) throw new Error("Product not found");
+
+  const vendorId = session?.user?.vendorId || product.vendorId;
+  if (!vendorId) throw new Error("Vendor not found");
+
+  if (session?.user?.role !== "admin" && product.vendorId !== vendorId) {
+    throw new Error("Unauthorized");
+  }
+
+  const existingRequest = await (db as any).productActionRequest.findFirst({
+    where: { productId, status: "PENDING" }
+  });
+
+  if (existingRequest) {
+    throw new Error("A pending request already exists for this product.");
+  }
+
+  const req = await (db as any).productActionRequest.create({
+    data: {
+      productId,
+      vendorId,
+      type: "EDIT",
+      requestedData: JSON.stringify(requestedData),
+    }
+  });
+
+  await db.notification.create({
+    data: {
+      target: "admin",
+      title: "📝 Product Edit Request",
+      message: `Vendor requested an edit for product "${product.title}".`,
+      type: "info",
+    },
+  });
+
+  // Send Email to Vendor (Pending Edit Request)
+  try {
+    const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(vendorId);
+
+    if (vendorEmail) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: vendorEmail,
+        subject: "Product Edit Request Submitted - PakDropship",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #f59e0b; text-align: center;">Edit Request Pending ⏳</h2>
+            <p>Dear <strong>${vendorName}</strong>,</p>
+            <p>Your request to edit the product <strong>"${product.title}"</strong> has been submitted successfully.</p>
+            <p>Our admin team will review your requested changes shortly. The product will continue to show its original details until the changes are approved.</p>
+            <p>We will notify you via email once the admin approves or rejects your request.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    }
+  } catch (emailError) {
+    console.error("Failed to send product edit request email:", emailError);
+  }
+
+  return req;
+}
+
+/**
+ * Request to delete an existing product (Requires Admin Approval)
+ */
+export async function requestProductDelete(productId: string) {
+  const session = await getServerSession(authOptions);
+  
+  const product = await db.product.findUnique({ where: { id: productId } });
+  if (!product) throw new Error("Product not found");
+
+  const vendorId = session?.user?.vendorId || product.vendorId;
+  if (!vendorId) throw new Error("Vendor not found");
+
+  if (session?.user?.role !== "admin" && product.vendorId !== vendorId) {
+    throw new Error("Unauthorized");
+  }
+
+  const existingRequest = await (db as any).productActionRequest.findFirst({
+    where: { productId, status: "PENDING" }
+  });
+
+  if (existingRequest) {
+    throw new Error("A pending request already exists for this product.");
+  }
+
+  const req = await (db as any).productActionRequest.create({
+    data: {
+      productId,
+      vendorId,
+      type: "DELETE",
+    }
+  });
+
+  await db.notification.create({
+    data: {
+      target: "admin",
+      title: "🗑️ Product Delete Request",
+      message: `Vendor requested to delete product "${product.title}".`,
+      type: "warning",
+    },
+  });
+
+  // Send Email to Vendor (Pending Delete Request)
+  try {
+    const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(vendorId);
+
+    if (vendorEmail) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: vendorEmail,
+        subject: "Product Delete Request Submitted - PakDropship",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #f59e0b; text-align: center;">Delete Request Pending ⏳</h2>
+            <p>Dear <strong>${vendorName}</strong>,</p>
+            <p>Your request to delete the product <strong>"${product.title}"</strong> has been submitted successfully.</p>
+            <p>Our admin team will review your request shortly. Once approved, the product will be removed from the platform.</p>
+            <p>We will notify you via email once the admin takes action on your request.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    }
+  } catch (emailError) {
+    console.error("Failed to send product delete request email:", emailError);
+  }
+
+  return req;
+}
+
+/**
+ * Admin approves a product edit or delete request
+ */
+export async function approveProductAction(requestId: string) {
+  const session = await getServerSession(authOptions);
+  if (session?.user?.role !== "admin") throw new Error("Unauthorized");
+
+  const req = await (db as any).productActionRequest.findUnique({
+    where: { id: requestId },
+    include: { product: true, vendor: true }
+  });
+
+  if (!req) throw new Error("Request not found");
+  if (req.status !== "PENDING") {
+    return { success: true };
+  }
+
+  if (req.type === "EDIT" && req.requestedData) {
+    const rawData = JSON.parse(req.requestedData);
+    const updateData: any = { ...rawData };
+
+    delete updateData.id;
+    delete updateData.createdAt;
+    delete updateData.updatedAt;
+    delete updateData.vendor;
+    delete updateData.category;
+    delete updateData.vendorId;
+
+    if (updateData.images !== undefined && typeof updateData.images !== "string") {
+      updateData.images = JSON.stringify(updateData.images);
+    }
+    if (updateData.colors !== undefined && typeof updateData.colors !== "string") {
+      updateData.colors = JSON.stringify(updateData.colors);
+    }
+    if (updateData.sizes !== undefined && typeof updateData.sizes !== "string") {
+      updateData.sizes = JSON.stringify(updateData.sizes);
+    }
+    if (updateData.colorPricing !== undefined && typeof updateData.colorPricing !== "string") {
+      updateData.colorPricing = JSON.stringify(updateData.colorPricing);
+    }
+    if (updateData.sizePricing !== undefined && typeof updateData.sizePricing !== "string") {
+      updateData.sizePricing = JSON.stringify(updateData.sizePricing);
+    }
+    if (updateData.colorImages !== undefined && typeof updateData.colorImages !== "string") {
+      updateData.colorImages = JSON.stringify(updateData.colorImages);
+    }
+
+    await db.product.update({
+      where: { id: req.productId },
+      data: updateData
+    });
+  } else if (req.type === "DELETE") {
+    try {
+      await (db as any).productActionRequest.deleteMany({
+        where: { productId: req.productId }
+      });
+      await db.product.delete({
+        where: { id: req.productId }
+      });
+    } catch (err) {
+      console.warn("Hard delete failed, soft deleting product:", err);
+      await db.product.update({
+        where: { id: req.productId },
+        data: { isActive: false, approvalStatus: "DELETED", rejectionReason: "Deleted by vendor" }
+      });
+    }
+  }
+
+  await (db as any).productActionRequest.update({
+    where: { id: requestId },
+    data: { status: "APPROVED" }
+  });
+
+  await db.notification.create({
+    data: {
+      target: req.vendorId,
+      title: "✅ Request Approved",
+      message: `Your ${req.type.toLowerCase()} request for "${req.product.title}" was approved.`,
+      type: "success",
+    },
+  });
+
+  // Send Email to Vendor
+  try {
+    const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(req.vendorId);
+
+    if (vendorEmail) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const action = req.type.toLowerCase();
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: vendorEmail,
+        subject: `Product ${req.type === "EDIT" ? "Edit" : "Delete"} Request Approved - PakDropship`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #10b981; text-align: center;">Request Approved ✅</h2>
+            <p>Dear <strong>${vendorName}</strong>,</p>
+            <p>Your request to <strong>${action}</strong> the product <strong>"${req.product.title}"</strong> has been approved by the admin.</p>
+            ${req.type === "EDIT" ? "<p>The product details have been successfully updated and are now live.</p>" : "<p>The product has been successfully removed.</p>"}
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    }
+  } catch (emailError) {
+    console.error("Failed to send product action approval email:", emailError);
+  }
+
+  return { success: true };
+}
+
+/**
+ * Admin rejects a product edit or delete request
+ */
+export async function rejectProductAction(requestId: string, reason: string) {
+  const session = await getServerSession(authOptions);
+  if (session?.user?.role !== "admin") throw new Error("Unauthorized");
+
+  const req = await (db as any).productActionRequest.findUnique({
+    where: { id: requestId },
+    include: { product: true, vendor: true }
+  });
+
+  if (!req) throw new Error("Request not found");
+  if (req.status !== "PENDING") {
+    return { success: true };
+  }
+
+  await (db as any).productActionRequest.update({
+    where: { id: requestId },
+    data: { status: "REJECTED", adminReason: reason }
+  });
+
+  await db.notification.create({
+    data: {
+      target: req.vendorId,
+      title: "❌ Request Rejected",
+      message: `Your ${req.type.toLowerCase()} request for "${req.product.title}" was rejected: ${reason}`,
+      type: "error",
+    },
+  });
+
+  // Send Email to Vendor
+  try {
+    const { email: vendorEmail, name: vendorName } = await resolveVendorEmail(req.vendorId);
+
+    if (vendorEmail) {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || "smtp.gmail.com",
+        port: parseInt(process.env.SMTP_PORT || "465"),
+        secure: true,
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      });
+
+      const action = req.type.toLowerCase();
+      const mailOptions = {
+        from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@pakdropship.pk",
+        to: vendorEmail,
+        subject: `Product ${req.type === "EDIT" ? "Edit" : "Delete"} Request Rejected - PakDropship`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #ef4444; text-align: center;">Request Rejected ❌</h2>
+            <p>Dear <strong>${vendorName}</strong>,</p>
+            <p>Your request to <strong>${action}</strong> the product <strong>"${req.product.title}"</strong> was rejected by the admin.</p>
+            <p><strong>Reason:</strong> ${reason}</p>
+            <p>If you have any questions, please contact our support team.</p>
+            <br>
+            <p>Best Regards,</p>
+            <p><strong>The PakDropship Team</strong></p>
+          </div>
+        `,
+      };
+
+      if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        await transporter.sendMail(mailOptions);
+      }
+    }
+  } catch (emailError) {
+    console.error("Failed to send product action rejection email:", emailError);
+  }
+
+  return { success: true };
+}
+
+/**
+ * Admin directly deletes a product
+ */
+export async function adminDeleteProduct(productId: string) {
+  const session = await getServerSession(authOptions);
+  if ((session?.user as any)?.role !== "admin") throw new Error("Unauthorized");
+
+  try {
+    await (db as any).productActionRequest.deleteMany({
+      where: { productId }
+    });
+    await db.product.delete({
+      where: { id: productId }
+    });
+  } catch (err) {
+    console.warn("Hard delete failed, soft deleting:", err);
+    await db.product.update({
+      where: { id: productId },
+      data: { isActive: false, approvalStatus: "DELETED", rejectionReason: "Deleted by admin" }
+    });
+  }
 
   return { success: true };
 }

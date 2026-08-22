@@ -11,14 +11,17 @@ export async function uploadToCloudinary(base64Data: string, folder = "pakdropsh
     const uploadString = base64Data.startsWith("data:") 
       ? base64Data 
       : `data:image/jpeg;base64,${base64Data}`;
-      
+
+    const isVideo = uploadString.startsWith("data:video");
+
     const result = await cloudinary.uploader.upload(uploadString, {
       folder,
+      resource_type: isVideo ? "video" : "image",
     });
     return result.secure_url;
   } catch (error) {
     console.error("Cloudinary Upload Error:", error);
-    throw new Error("Failed to upload image to Cloudinary.");
+    throw new Error("Failed to upload media to Cloudinary.");
   }
 }
 

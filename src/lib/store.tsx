@@ -1,10 +1,11 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSession, signOut } from "next-auth/react";
 import { toast } from "sonner";
 import { fetchAppData } from "@/actions/appData";
 import { placeOrder as serverPlaceOrder, updateOrderStatus, getOrderTimeline, simulateLockState, resetLockState } from "@/actions/orders";
 import { requestWithdrawal, approveWithdrawal } from "@/actions/wallet";
-import { sendMessage, markMessagesRead, markNotificationsReadAction } from "@/actions/messages";
+import { sendMessage, markMessagesRead, markNotificationsReadAction, markSingleNotificationReadAction } from "@/actions/messages";
+import { requestProductEdit as reqEdit, requestProductDelete as reqDel, approveProductAction as appAction, rejectProductAction as rejAction } from "@/actions/vendorProduct";
 import { processUnlockRequest } from "@/actions/orders";
 import { submitKycAction } from "@/actions/kyc";
 import { requestOrderEditAction, approveOrderEditAction, rejectOrderEditAction } from "@/actions/orderEdit";
@@ -80,8 +81,11 @@ export type KycRequest = {
   idFront: string | null; idBack: string | null; bankName: string; accountName: string;
   accountNumber: string; iban: string | null; accountType: string; status: string;
   adminNote: string | null; reviewedBy: string | null; date: any;
-  businessAddress: string | null; pickupAddress: string | null; pickupCity: string | null;
-  pickupPhone: string | null; returnAddress: string | null; returnCity: string | null;
+  businessAddress?: string | null; pickupAddress?: string | null; pickupCity?: string | null;
+  pickupPhone?: string | null; returnAddress?: string | null; returnCity?: string | null;
+  returnPhone?: string | null;
+  stockVideo?: string | null;
+  stockImages?: string | null;
 };
 export type PlatformConfig = { id: string; deliveryFee: number; platformFeePerOrder: number; vendorFeePercent: number; resellerFeePercent: number; minWithdrawal: number; codReserveAmount: number; firstOrdersMonitor: number; rtoCharge: number; };
 
@@ -102,59 +106,74 @@ type State = {
   messages: Message[];
   notifications: Notification[];
   kycRequests: KycRequest[];
+  productActionRequests: any[];
 };
 
 const emptyState: State = {
-  role: "guest", currentUser: null, config: null,
-  categories: [], products: [], resellers: [], vendors: [],
-  currentResellerId: "", currentVendorId: "",
-  orders: [], ledger: [], payouts: [],
-  unlocks: [], messages: [], notifications: [], kycRequests: [],
+  role: "guest",
+  currentUser: null,
+  config: null,
+  categories: [],
+  products: [],
+  orders: [],
+  ledger: [],
+  payouts: [],
+  unlocks: [],
+  messages: [],
+  notifications: [],
+  resellers: [],
+  vendors: [],
+  kycRequests: [],
+  productActionRequests: [],
+  currentResellerId: "r1",
+  currentVendorId: "v1",
 };
 
-type Ctx = {
+export interface Ctx {
   s: State;
-  setRole: (r: Role) => void;
   me: Reseller;
   meVendor: Vendor;
   locked: boolean;
+  isDataLoading: boolean;
+  refreshData: () => Promise<void>;
+  setRole: (role: Role) => void;
   setCurrentReseller: (id: string) => void;
   setCurrentVendor: (id: string) => void;
-  updateBrand: (patch: Partial<Reseller>) => void;
-  updateVendorProfile: (patch: Partial<Vendor>) => void;
-  addCategory: (title: string, image: string) => void;
-  deleteCategory: (id: string) => void;
-  saveProduct: (p: any) => void;
-  deleteProduct: (id: string) => void;
-  submitVendorProduct: (p: any) => void;
-  approveVendorProduct: (productId: string) => void;
-  rejectVendorProduct: (productId: string) => void;
-  placeOrder: (o: any) => Promise<void>;
-  setStatus: (id: string, status: string, note?: string, trackingId?: string, courier?: string) => Promise<void>;
-  bookOrders: (orderIds: string[], courier: string) => void;
-  requestOrderEdit: (id: string, edits: Partial<Order>) => void;
-  approveOrderEdit: (id: string) => void;
-  rejectOrderEdit: (id: string) => void;
-  requestPayout: (p: any) => Promise<void>;
+  updateBrand: (patch: Partial<Reseller>) => Promise<void>;
+  updateVendorProfile: (data: any) => Promise<void>;
+
+  submitVendorProduct: (p: any) => Promise<void>;
+  approveVendorProduct: (id: string) => Promise<void>;
+  rejectVendorProduct: (id: string) => Promise<void>;
+  requestProductEdit: (productId: string, data: any) => Promise<void>;
+  requestProductDelete: (productId: string) => Promise<void>;
+  approveProductAction: (requestId: string) => Promise<void>;
+  rejectProductAction: (requestId: string, reason: string) => Promise<void>;
+
+  placeOrder: (o: Omit<Order, "id" | "status" | "createdAt" | "updatedAt" | "statusHistory">) => Promise<void>;
+  setStatus: (id: string, status: Order["status"], note?: string, trackingId?: string, courier?: string) => Promise<void>;
+  bookOrders: () => void;
+  requestOrderEdit: (id: string, edits: Partial<Order>) => Promise<void>;
+  approveOrderEdit: (id: string) => Promise<void>;
+  rejectOrderEdit: (id: string) => Promise<void>;
+
+  credit: () => void;
+  simulateLock: () => Promise<void>;
+  resetLock: () => Promise<void>;
+  requestPayout: (p: { amount: number; method: string; accountName: string; accountNumber: string }) => Promise<void>;
   markPaid: (id: string, approve: boolean, paymentRef?: string, adminNote?: string) => Promise<void>;
   requestUnlock: (trxId: string, receipt: string) => Promise<void>;
   approveUnlock: (id: string, approve: boolean, adminNote?: string) => Promise<void>;
-  send: (resellerId: string, from: any, text: string, attachmentUrl?: string, attachmentType?: any) => Promise<void>;
-  markRead: (resellerId: string, reader: "admin" | "reseller") => Promise<void>;
-  addNotification: (target: string, title: string, message: string) => void;
-  markNotificationsRead: (target: string) => void;
-  updatePlatformLogo: (url: string) => void;
-  login: (email: string, pass: string) => boolean;
-  logout: () => void;
-  submitKyc: (k: any) => void;
-  approveKyc: (id: string) => void;
-  rejectKyc: (id: string) => void;
-  refreshData: () => Promise<void>;
-  credit: (resellerId: string, amount: number, label: string, tag: string, proof?: string) => void;
-  simulateLock: () => Promise<void>;
-  resetLock: () => Promise<void>;
-  isDataLoading: boolean;
-};
+
+  send: (resellerId: string, from: Message["from"], text: string, attachmentUrl?: string, attachmentType?: Message["attachmentType"]) => Promise<void>;
+  markRead: (resellerId: string, reader: "reseller" | "admin") => Promise<void>;
+  markNotificationsRead: (target: string) => Promise<void>;
+  markSingleNotificationRead: (id: string) => Promise<void>;
+
+  submitKyc: (formData: any) => Promise<void>;
+  approveKyc: (id: string) => Promise<void>;
+  rejectKyc: (id: string) => Promise<void>;
+}
 
 const StoreCtx = createContext<Ctx | null>(null);
 
@@ -162,10 +181,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [s, set] = useState<State>(emptyState);
   const [isDataLoading, setIsDataLoading] = useState(true);
   const { data: session, status } = useSession();
+  const isFetchingRef = useRef(false);
 
-  const loadData = async () => {
-    if (status === "loading") return;
-    setIsDataLoading(true);
+  const loadData = async (isBackground = false) => {
+    if (status === "loading" || isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    if (!isBackground) setIsDataLoading(true);
     try {
       const data = await fetchAppData();
       set(prev => ({
@@ -185,18 +206,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         resellers: data.state.resellers?.length > 0 ? data.state.resellers : (data.state.me ? [data.state.me] : []),
         vendors: data.state.vendors?.length > 0 ? data.state.vendors : (data.state.meVendor ? [data.state.meVendor] : []),
         kycRequests: data.state.kycRequests ?? [],
+        productActionRequests: (data.state.productActionRequests ?? []).map((r: any) => ({
+          ...r,
+          product: r.product ? {
+            ...r.product,
+            images: Array.isArray(r.product.images) ? r.product.images : JSON.parse(r.product.images || "[]"),
+            colors: Array.isArray(r.product.colors) ? r.product.colors : JSON.parse(r.product.colors || "[]"),
+            sizes: Array.isArray(r.product.sizes) ? r.product.sizes : JSON.parse(r.product.sizes || "[]"),
+            colorPricing: r.product.colorPricing ? (typeof r.product.colorPricing === "string" ? JSON.parse(r.product.colorPricing) : r.product.colorPricing) : {},
+            sizePricing: r.product.sizePricing ? (typeof r.product.sizePricing === "string" ? JSON.parse(r.product.sizePricing) : r.product.sizePricing) : {},
+          } : null,
+        })),
         currentResellerId: data.state.me?.id || (data.state.resellers?.[0]?.id ?? ""),
         currentVendorId: data.state.meVendor?.id || (data.state.vendors?.[0]?.id ?? ""),
       }));
     } catch (e: any) {
       console.error("fetchAppData error:", e.message);
     } finally {
-      setIsDataLoading(false);
+      isFetchingRef.current = false;
+      if (!isBackground) setIsDataLoading(false);
     }
   };
 
   useEffect(() => {
     loadData();
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        loadData(true);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
   }, [status, session]);
 
   const value = useMemo<Ctx>(() => {
@@ -205,6 +244,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       pendingBalance: 0, codReserve: 0, totalWithdrawn: 0,
       isLocked: false, totalOrdersPlaced: 0, totalOrdersFailed: 0,
       shopifyConnected: false, shopifyDomain: null,
+      email: null, storeAddress: null, supportEmail: null, createdAt: new Date(), shopifyToken: null
     };
     const meVendor = s.vendors.find(v => v.id === s.currentVendorId) ?? {
       id: "", name: "", brandName: "Guest", phone: "", bankName: "",
@@ -234,14 +274,94 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.error(e.message);
         }
       },
-      updateVendorProfile: () => toast.info("Profile update — use profile API in production"),
+      updateVendorProfile: async () => { toast.info("Profile update — use profile API in production"); },
       addCategory: () => {},
       deleteCategory: () => {},
       saveProduct: () => {},
-      deleteProduct: () => {},
-      submitVendorProduct: () => {},
-      approveVendorProduct: () => {},
-      rejectVendorProduct: () => {},
+      deleteProduct: async (id: string) => {
+        try {
+          const { adminDeleteProduct } = await import("@/actions/vendorProduct");
+          await adminDeleteProduct(id);
+          await loadData();
+          toast.success("Product deleted successfully");
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      submitVendorProduct: async (data) => {
+        try {
+          // Convert array inputs to JSON strings for the server action
+          const payload = {
+            ...data,
+            images: JSON.stringify(data.images || []),
+            colors: JSON.stringify(data.colors || []),
+            sizes: JSON.stringify(data.sizes || []),
+            colorPricing: data.colorPricing ? JSON.stringify(data.colorPricing) : undefined,
+            sizePricing: data.sizePricing ? JSON.stringify(data.sizePricing) : undefined,
+            colorImages: data.colorImages ? JSON.stringify(data.colorImages) : undefined,
+          };
+          const { submitVendorProduct: submitAction } = await import("@/actions/vendorProduct");
+          await submitAction(payload);
+          await loadData();
+        } catch (e: any) {
+          toast.error(e.message || "Failed to submit product");
+          throw e; // Throw so the UI can handle loading state if needed
+        }
+      },
+      approveVendorProduct: async (id) => {
+        try {
+          const { approveVendorProduct: approveAction } = await import("@/actions/vendorProduct");
+          await approveAction(id);
+          await loadData();
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      rejectVendorProduct: async (id) => {
+        try {
+          const { rejectVendorProduct: rejectAction } = await import("@/actions/vendorProduct");
+          await rejectAction(id, "Does not meet our quality standards.");
+          await loadData();
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      requestProductEdit: async (productId, data) => {
+        try {
+          await reqEdit(productId, data);
+          await loadData();
+          toast.success("Edit request submitted to admin");
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      requestProductDelete: async (productId) => {
+        try {
+          await reqDel(productId);
+          await loadData();
+          toast.success("Delete request submitted to admin");
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      approveProductAction: async (requestId) => {
+        try {
+          await appAction(requestId);
+          await loadData();
+          toast.success("Request approved successfully");
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
+      rejectProductAction: async (requestId, reason) => {
+        try {
+          await rejAction(requestId, reason);
+          await loadData();
+          toast.success("Request rejected");
+        } catch (e: any) {
+          toast.error(e.message);
+        }
+      },
 
       placeOrder: async (o) => {
         const order = await serverPlaceOrder(o);
@@ -343,6 +463,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await loadData();
         } catch (e: any) {
           console.error("Failed to mark notifications read:", e.message);
+        }
+      },
+      markSingleNotificationRead: async (id) => {
+        try {
+          await markSingleNotificationReadAction(id);
+          await loadData();
+        } catch (e: any) {
+          console.error("Failed to mark single notification read:", e.message);
         }
       },
       updatePlatformLogo: () => {},
